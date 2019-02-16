@@ -1,0 +1,15 @@
+*.exp
+*.lib
+*.o
+*.obj
+*.pyc
+*.pyd
+*.so
+.DS_Store
+.project
+.pydevproject
+.settings/org.eclipse.core.resources.prefs
+MANIFEST
+dist
+build
+*.pkl
