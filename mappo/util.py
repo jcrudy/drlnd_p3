@@ -9,6 +9,7 @@ from torch.tensor import Tensor
 from numpy import ndarray
 import scipy.signal
 import os
+from typing import Iterable
 
 
 class Constant(object):
@@ -151,5 +152,17 @@ def split_path(path):
             return [tail]
     return split_path(path) + ([tail] if tail else [])
         
+
+tupify = Dispatcher('tupify')
+
+@tupify.register((np.ndarray, object))
+def tupify_ndarray(arr):
+    return (arr,)
+
+@tupify.register(Iterable)
+def tupify_iterable(itr):
+    return tuple(itr)
+
+
 
 
