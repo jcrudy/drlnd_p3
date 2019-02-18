@@ -30,11 +30,11 @@ if __name__ == '__main__':
                                   MuSigmaLayer(hidden_size, action_size),
                                   )
     critic_network = nn.Sequential(
-                                   nn.Linear(state_size, hidden_size),
+                                   nn.Linear((2 * (state_size + action_size)), hidden_size),
                                    nn.ReLU(),
                                    nn.Linear(hidden_size, hidden_size),
                                    nn.ReLU(),
-                                   nn.Linear(hidden_size, 1),
+                                   nn.Linear(hidden_size, 2),
                                    )
     
     actor_model_1 = NormalPolicy(actor_network_1)
@@ -44,7 +44,7 @@ if __name__ == '__main__':
     agent_2 = Agent(policy_model=actor_model_2)
     trainer = Trainer((agent_1, agent_2), value_model=critic_network)
     
-    trainer.train(environment, 1000)
+    trainer.train(environment, 20)
     trainer.to_pickle(weights_path)
     trainer.plot()
     plt.savefig(plot_path)

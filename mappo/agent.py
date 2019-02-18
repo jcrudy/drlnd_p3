@@ -57,7 +57,13 @@ class NormalPolicy(PolicyModel):
         sigma = mu_sigma[slicer + (1,)]
         return Normal(mu, sigma)
 
-        
+# class TanhNormalPolicy(NormalPolicy):
+#     def sample(self, *args, **kwargs):
+#         return F.tanh(NormalPolicy.sample(self, *args, **kwargs))
+#     
+#     def log_prob(self, state, sample):
+#         return NormalPolicy.log_prob(self, state, 0.5 * torch.log((1 + sample) / (1 - sample)))
+    
 # @curry
 # def select_first_dims(selection, arr):
 #     return arr[tupify(selection) + (slice(None, None, None),) * (len(arr.shape) - len(selection))]
@@ -79,8 +85,8 @@ def select_batch(expected_batch_size, *args):
     '''
     Randomly select episodes and time steps.
     '''
-    p = expected_batch_size / float(np.prod(args[0].shape[1:3]))
-    selection = np.where(np.random.binomial(1, p, size=args[0].shape[:2]) > 0)
+    p = min(expected_batch_size / float(np.prod(args[0].shape[1])), 1.)
+    selection = np.where(np.random.binomial(1, p, size=args[0].shape[1]) > 0)
     return tuple(map(select_dims(selection, 1), args))
 
 @curry
@@ -92,18 +98,23 @@ def select_agent(agent_index, *args):
     return tuple(result) if len(result) > 1 else result[0]
 
 class Agent(object):
-    def __init__(self, policy_model, policy_optimizerer=partial(optim.Adam, lr=3e-4),
+    def __init__(self, policy_model, policy_optimizerer=partial(optim.Adam, lr=3e-3),
                  policy_schedulerer=partial(optim.lr_scheduler.LambdaLR, lr_lambda=Constant(1.))):
         self.policy_model = policy_model
         self.policy_optimizer = policy_optimizerer(self.policy_model.parameters())
         self.policy_scheduler = policy_schedulerer(self.policy_optimizer)
         
+    def act(self, state):
+        return self.policy_model.sample(state)
+    
+    def prob(self, state, action):
+        return self.policy_model.prob(state, action)
     
 class Trainer(object):
     def __init__(self, agents, value_model, value_optimizerer=partial(optim.Adam, lr=3e-4), 
                  value_schedulerer=partial(optim.lr_scheduler.LambdaLR, lr_lambda=Constant(1.)),
-                 gamma=.9, lambda_=0., n_updates_per_episode=10, n_episodes_per_batch=10, epsilon=.1, 
-                 expected_minibatch_size=15000, policy_clip=None, value_clip=None):
+                 gamma=.9, lambda_=0., n_updates_per_episode=40, n_episodes_per_batch=100, epsilon=.1, 
+                 expected_minibatch_size=500, policy_clip=None, value_clip=None, action_transformer=np.tanh):
         self.agents = agents
         self.value_model = value_model
         self.value_optimizer = value_optimizerer(self.value_model.parameters())
@@ -120,6 +131,7 @@ class Trainer(object):
         self.expected_minibatch_size = expected_minibatch_size
         self.policy_clip = policy_clip
         self.value_clip = value_clip
+        self.action_transformer = action_transformer
     
     
     def to_pickle(self, filename):
@@ -133,8 +145,15 @@ class Trainer(object):
         if type(result) is not cls:
             raise TypeError('Unpickled object is not correct type.')
         return result
-
-
+    
+    def value(self, state, action):
+        if len(state.shape) == 2:
+            return self.value_model(torch.cat([state.view(state.numel()), action.view(action.numel())], dim=0))
+        elif len(state.shape) == 3:
+            return self.value_model(torch.cat([state.permute([1,0,2]).view(state.shape[1], -1), action.permute([1,0,2]).view(action.shape[1], -1)], dim=-1)).permute([1,0])
+        else:
+            raise ValueError('Unexpected shape for state: %s' % str(state.shape))
+        
     def collect_trajectory(self, environment):
         brain_name = environment.brain_names[0]
         env_info = environment.reset(train_mode=True)[brain_name]
@@ -156,47 +175,60 @@ class Trainer(object):
             prob = torch.stack(probs, dim=0)
 #             action = self.policy_model.sample(torch_state)
 #             prob = self.policy_model.prob(torch_state, action)
-            value = self.value_model(torch_state).squeeze(-1)
+            value = self.value(torch_state, action)
 #             value = self.value_model(torch_state)
             numpy_action = numpify(action)
-            env_info = environment.step(numpy_action)[brain_name]
-            next_state, reward, done = environment.step(numpy_action)
+            env_info = environment.step(self.action_transformer(numpy_action))[brain_name]
+            next_state = env_info.vector_observations
+            reward = env_info.rewards
+            done = env_info.local_done
+#             next_state, reward, done = environment.step(numpy_action)
             
             trajectory.append((state, numpy_action, numpify(prob), reward, done, numpify(value)))
         return list(map(partial(np.stack, axis=1), zip(*trajectory)))
     
+    def augment_trajectory(self, trajectory):
+        states, actions, old_probs, rewards, dones, old_values = trajectory
+        td_target_values = td_target(self.gamma, rewards, old_values, axis=1)
+        advantages = gae(self.gamma, self.lambda_, rewards, old_values, axis=1)
+        advantage_means = np.mean(advantages, axis=1, keepdims=True)
+        advantage_sds = np.std(advantages, axis=1, keepdims=True)
+        normalized_advantages = (advantages - advantage_means) / np.where(advantage_sds > 1e-6, advantage_sds, 1.)
+        return states, actions, old_probs, rewards, dones, old_values, td_target_values, normalized_advantages
+    
     def collect_batch(self, environment):
-        trajectories = [self.collect_trajectory(environment) for _ in range(self.n_episodes_per_batch)]
-        
-        # Stack them along the episode dimension (1) and return.
-        return list(map(partial(np.stack, axis=1), zip(*trajectories)))
+        trajectories = [self.augment_trajectory(self.collect_trajectory(environment)) for _ in range(self.n_episodes_per_batch)]
+
+        # Stack them along the time dimension (1) and return.
+        return list(map(partial(np.concatenate, axis=1), zip(*trajectories)))
     
     def train(self, environment, num_epochs=1000):
         for _ in tqdm(range(num_epochs)):
             self.train_step(environment)
-            self.policy_scheduler.step(self.train_scores[-1])
+            for agent in self.agents:
+                agent.policy_scheduler.step(self.train_scores[-1])
             self.value_scheduler.step(self.train_scores[-1])
     
     
     def train_step(self, environment):
         '''
-        Assume environment output has shape (n_agents, n_episodes, n_time_steps, ...)
+        Assume environment output has shape (n_agents, n_time_steps * episodes, ...)
         '''
         
         # Collect a batch of episodes for all agents.
-        states, actions, old_probs, rewards, dones, old_values = self.collect_batch(environment)
+        states, actions, old_probs, rewards, dones, old_values, td_target_values, normalized_advantages = self.collect_batch(environment)
         
         # Some stats
-        total_rewards = np.sum(rewards, axis=2)
-        average_rewards = np.mean(total_rewards, axis=1)
+        total_rewards = np.sum(rewards, axis=1)
+        average_rewards = total_rewards / float(self.n_episodes_per_batch)
         score = np.max(average_rewards)
         
-        # Compute TD target and gae.
-        td_target_values = td_target(self.gamma, rewards, old_values, axis=2)
-        advantages = gae(self.gamma, self.lambda_, rewards, old_values, axis=2)
-        advantage_means = np.mean(advantages, axis=2, keepdims=True)
-        advantage_sds = np.std(advantages, axis=2, keepdims=True)
-        normalized_advantages = (advantages - advantage_means) / np.where(advantage_sds > 1e-6, advantage_sds, 1.)
+#         # Compute TD target and gae.
+#         td_target_values = td_target(self.gamma, rewards, old_values, axis=2)
+#         advantages = gae(self.gamma, self.lambda_, rewards, old_values, axis=2)
+#         advantage_means = np.mean(advantages, axis=2, keepdims=True)
+#         advantage_sds = np.std(advantages, axis=2, keepdims=True)
+#         normalized_advantages = (advantages - advantage_means) / np.where(advantage_sds > 1e-6, advantage_sds, 1.)
         
         
         for _ in range(self.n_updates_per_episode):
@@ -211,26 +243,29 @@ class Trainer(object):
             batch_torch_actions = torchify32(batch_actions)
             
             # Update value model.
-            value_loss = torch.mean((self.value_model(batch_torch_states).squeeze(-1) - batch_torch_td_targets) ** 2)
+            value_loss = torch.mean((self.value(batch_torch_states, batch_torch_actions) - batch_torch_td_targets) ** 2)
             self.value_optimizer.zero_grad()
             value_loss.backward()
+#             print('value_loss = %s' % value_loss)
             if self.value_clip is not None:
                 nn.utils.clip_grad_norm(self.policy_model.parameters(), self.value_clip)
             self.value_optimizer.step()
             
             # Update the policy model for each agent.
             for i, agent in enumerate(self.agents):
-                agent.policy_optimizer.zero_grad()
                 batch_agent_torch_states, batch_agent_torch_actions, batch_agent_old_probs, \
                         batch_agent_advantages = select_agent(i, 
                         batch_torch_states, batch_torch_actions, batch_old_probs, batch_advantages)
                 
                 batch_agent_probs = agent.prob(batch_agent_torch_states, batch_agent_torch_actions)
                 batch_agent_ratio = batch_agent_probs / torchify32(batch_agent_old_probs)
+                batch_agent_ratio[batch_agent_ratio != batch_agent_ratio] = 0.
                 batch_agent_clipped_ratio = batch_agent_ratio.clamp(min = 1. - self.epsilon, max = 1 + self.epsilon)
                 batch_agent_torch_advantages = torchify32(batch_agent_advantages)
                 agent_policy_loss = -torch.mean(torch.min(batch_agent_ratio * batch_agent_torch_advantages, 
                                           batch_agent_clipped_ratio * batch_agent_torch_advantages))
+#                 print('agent_policy_loss = %s' % agent_policy_loss)
+                agent.policy_optimizer.zero_grad()
                 agent_policy_loss.backward()
                 if self.policy_clip is not None:
                     nn.utils.clip_grad_norm(agent.policy_model.parameters(), self.policy_clip)
@@ -300,7 +335,7 @@ class Trainer(object):
 #         while not np.all(done):
 #             state = next_state
 #             torch_state = torchify32(state)
-#             action = self.policy_model.sample(torch_state)
+#             action = self.policy_model.(torch_state)
 #             prob = self.policy_model.prob(torch_state, action)
 #             value = self.value_model(torch_state).squeeze(-1)
 # #             value = self.value_model(torch_state)
