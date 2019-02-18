@@ -44,7 +44,7 @@ if __name__ == '__main__':
     agent_2 = Agent(policy_model=actor_model_2)
     trainer = Trainer((agent_1, agent_2), value_model=critic_network)
     
-    trainer.train(environment, 20)
+    trainer.train(environment, 200)
     trainer.to_pickle(weights_path)
     trainer.plot()
     plt.savefig(plot_path)

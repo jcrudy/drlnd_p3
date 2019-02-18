@@ -98,7 +98,7 @@ def select_agent(agent_index, *args):
     return tuple(result) if len(result) > 1 else result[0]
 
 class Agent(object):
-    def __init__(self, policy_model, policy_optimizerer=partial(optim.Adam, lr=3e-3),
+    def __init__(self, policy_model, policy_optimizerer=partial(optim.Adam, lr=2e-4),
                  policy_schedulerer=partial(optim.lr_scheduler.LambdaLR, lr_lambda=Constant(1.))):
         self.policy_model = policy_model
         self.policy_optimizer = policy_optimizerer(self.policy_model.parameters())
@@ -114,7 +114,7 @@ class Trainer(object):
     def __init__(self, agents, value_model, value_optimizerer=partial(optim.Adam, lr=3e-4), 
                  value_schedulerer=partial(optim.lr_scheduler.LambdaLR, lr_lambda=Constant(1.)),
                  gamma=.9, lambda_=0., n_updates_per_episode=40, n_episodes_per_batch=100, epsilon=.1, 
-                 expected_minibatch_size=500, policy_clip=None, value_clip=None, action_transformer=np.tanh):
+                 expected_minibatch_size=750, policy_clip=None, value_clip=None, action_transformer=np.tanh):
         self.agents = agents
         self.value_model = value_model
         self.value_optimizer = value_optimizerer(self.value_model.parameters())
