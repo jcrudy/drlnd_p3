@@ -123,6 +123,7 @@ tennis = download_unity_environment(
                 mac_url='https://s3-us-west-1.amazonaws.com/udacity-drlnd/P3/Tennis/Tennis.app.zip',
                 win32_url='https://s3-us-west-1.amazonaws.com/udacity-drlnd/P3/Tennis/Tennis_Windows_x86.zip',
                 win64_url='https://s3-us-west-1.amazonaws.com/udacity-drlnd/P3/Tennis/Tennis_Windows_x86_64.zip',
-                directory = os.path.join(resources, 'tennis')
+                directory = os.path.join(resources, 'tennis'),
+                linux_name=os.path.join('Tennis_Linux', 'Tennis.x86_64')
                 )
 
