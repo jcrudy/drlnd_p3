@@ -113,8 +113,9 @@ class Agent(object):
 class Trainer(object):
     def __init__(self, agents, value_model, value_optimizerer=partial(optim.Adam, lr=3e-4), 
                  value_schedulerer=partial(optim.lr_scheduler.LambdaLR, lr_lambda=Constant(1.)),
-                 gamma=.9, lambda_=0., n_updates_per_episode=40, n_episodes_per_batch=100, epsilon=.1, 
-                 expected_minibatch_size=750, policy_clip=None, value_clip=None, action_transformer=np.tanh):
+                 gamma=.9, lambda_=0., n_updates_per_episode=20, n_episodes_per_batch=100, epsilon=.05, 
+                 expected_minibatch_size=750, policy_clip=None, value_clip=None, action_transformer=np.tanh,
+                 scheduler_window=100, early_stopping_window=100, early_stopping_threshold=1.5):
         self.agents = agents
         self.value_model = value_model
         self.value_optimizer = value_optimizerer(self.value_model.parameters())
@@ -132,6 +133,9 @@ class Trainer(object):
         self.policy_clip = policy_clip
         self.value_clip = value_clip
         self.action_transformer = action_transformer
+        self.scheduler_window = scheduler_window
+        self.early_stopping_window = early_stopping_window
+        self.early_stopping_threshold = early_stopping_threshold
     
     
     def to_pickle(self, filename):
@@ -203,11 +207,17 @@ class Trainer(object):
         return list(map(partial(np.concatenate, axis=1), zip(*trajectories)))
     
     def train(self, environment, num_epochs=1000):
-        for _ in tqdm(range(num_epochs)):
+        iterator = tqdm(range(num_epochs))
+        for _ in iterator:
             self.train_step(environment)
+            scheduler_score = np.mean(self.train_scores[-self.scheduler_window:])
             for agent in self.agents:
-                agent.policy_scheduler.step(self.train_scores[-1])
-            self.value_scheduler.step(self.train_scores[-1])
+                agent.policy_scheduler.step(scheduler_score)
+            self.value_scheduler.step(scheduler_score)
+            if self.early_stopping_threshold is not None and np.mean(self.train_scores[-self.early_stopping_window:]) > self.early_stopping_threshold:
+                print('Stopping early.')
+                iterator.close()
+                break
     
     
     def train_step(self, environment):
